@@ -1,0 +1,1 @@
+add_library(icosphere fast_icosphere.h fast_icosphere.cpp)
