@@ -152,15 +152,15 @@ void FillIcoFace(
     for (size_t j = 1; j < bottom_row.size() - 1; j++) {
       std::array<double, 3> pos;
       size_t new_tri_ind = (*v_ind);
-      if (j == bottom_row.size() - 2) {
-        // No need to create new point
-        pos = right_side[i].second;
-        new_tri_ind = right_side[i].first;
-      } else {
+      if (j != bottom_row.size() - 2) {
         pos = {left_side[i].second[0] + (double)(j)*jump[0],
                left_side[i].second[1] + (double)(j)*jump[1],
                left_side[i].second[2] + (double)(j)*jump[2]};
         (*vertices)[(*v_ind)++] = pos;
+      } else {
+        // No need to create new point
+        pos = right_side[i].second;
+        new_tri_ind = right_side[i].first;
       }
       size_t ind_top_left = new_bottom_row[new_bottom_row.size() - 1].first;
       size_t ind_top_right = new_tri_ind;
