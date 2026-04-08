@@ -1,13 +1,29 @@
 #include "fast_icosphere.h"
 
 namespace {
-/**
- * @brief Just fill the data for an icosahedron. Got from here:
- * https://observablehq.com/@mourner/fast-icosphere-mesh
- * Both inputs need to be empty, otherwise the face indices are not right.
- */
+
+struct EdgeKey {
+  size_t first, second;
+  bool operator==(const EdgeKey &o) const {
+    return first == o.first && second == o.second;
+  }
+};
+
+struct EdgeKeyHash {
+  size_t operator()(const EdgeKey &k) const {
+    // Szudzik pairing — injective for our index range
+    return k.first >= k.second
+               ? k.first * k.first + k.first + k.second
+               : k.second * k.second + k.first;
+  }
+};
+
+// Edge data stores the vertex index of the first endpoint, then intermediate
+// vertices, then the last endpoint — exactly (num_additional + 2) entries.
+using EdgeMap = std::unordered_map<EdgeKey, std::vector<size_t>, EdgeKeyHash>;
+
 void BasicIcosahedron(std::vector<std::array<double, 3>> *vertexPositions,
-                      std::vector<std::vector<size_t>> *faceIndices) {
+                      std::vector<std::array<size_t, 3>> *faceIndices) {
   const double f = (1 + std::sqrt(5)) / 2;
   (*vertexPositions)[0] = {-1, f, 0};
   (*vertexPositions)[1] = {1, f, 0};
@@ -43,143 +59,127 @@ void BasicIcosahedron(std::vector<std::array<double, 3>> *vertexPositions,
   (*faceIndices)[19] = {8, 6, 7};
 }
 
-double Norm(const std::array<double, 3> &pos) {
-  double pos_len =
-      std::sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]);
-  return pos_len;
+inline void Sort3(size_t &a, size_t &b, size_t &c) {
+  if (a > b) std::swap(a, b);
+  if (b > c) std::swap(b, c);
+  if (a > b) std::swap(a, b);
 }
 
-void Normalize(std::array<double, 3> *pos) {
-  double pos_len = Norm(*pos);
-  (*pos)[0] = (*pos)[0] / pos_len;
-  (*pos)[1] = (*pos)[1] / pos_len;
-  (*pos)[2] = (*pos)[2] / pos_len;
-}
+void AddSingleEdge(const size_t first, const size_t second,
+                   const int num_additional, EdgeMap *edge_data,
+                   std::vector<std::array<double, 3>> *vertices,
+                   size_t *v_ind) {
+  EdgeKey key{first, second};
+  if (edge_data->count(key))
+    return;
 
-void AddSingleEdge(
-    const size_t first, const size_t second, const int num_additional,
-    std::map<std::pair<size_t, size_t>,
-             std::vector<std::pair<size_t, std::array<double, 3>>>> *edge_data,
-    std::vector<std::array<double, 3>> *vertices, size_t *v_ind) {
-  if (edge_data->count(std::make_pair(first, second)) == 0) {
-    std::pair<size_t, size_t> edge_key = std::make_pair(first, second);
-    std::array<double, 3> first_pos = (*vertices)[first];
-    std::array<double, 3> second_pos = (*vertices)[second];
-    std::array<double, 3> jump_vec = {
-        (second_pos[0] - first_pos[0]) / ((double)(num_additional + 1)),
-        (second_pos[1] - first_pos[1]) / ((double)(num_additional + 1)),
-        (second_pos[2] - first_pos[2]) / ((double)(num_additional + 1))};
-    // Add first
-    (*edge_data)[edge_key].push_back(std::make_pair(first, first_pos));
-    // Add in between to vertices and map.
-    for (size_t i = 0; i < (size_t)(num_additional); i++) {
-      std::array<double, 3> pos = {
-          first_pos[0] + jump_vec[0] * ((double)(i + 1)),
-          first_pos[1] + jump_vec[1] * ((double)(i + 1)),
-          first_pos[2] + jump_vec[2] * ((double)(i + 1))};
-      (*vertices)[*v_ind] = pos;
-      (*edge_data)[edge_key].push_back(std::make_pair((*v_ind), pos));
-      (*v_ind)++;
-    }
-    // Add last, (already in vertices)
-    (*edge_data)[edge_key].push_back(std::make_pair(second, second_pos));
+  const int total = num_additional + 2;
+  std::vector<size_t> indices;
+  indices.reserve(total);
+
+  const auto &first_pos = (*vertices)[first];
+  const auto &second_pos = (*vertices)[second];
+  const double inv = 1.0 / (num_additional + 1);
+  const double dx = (second_pos[0] - first_pos[0]) * inv;
+  const double dy = (second_pos[1] - first_pos[1]) * inv;
+  const double dz = (second_pos[2] - first_pos[2]) * inv;
+
+  indices.push_back(first);
+  for (int i = 0; i < num_additional; i++) {
+    const double t = (double)(i + 1);
+    (*vertices)[*v_ind] = {first_pos[0] + dx * t, first_pos[1] + dy * t,
+                           first_pos[2] + dz * t};
+    indices.push_back((*v_ind)++);
   }
+  indices.push_back(second);
+
+  edge_data->emplace(key, std::move(indices));
 }
 
-void AddIcoEdgePoints(
-    const int num_additional, const std::vector<size_t> &inds,
-    std::map<std::pair<size_t, size_t>,
-             std::vector<std::pair<size_t, std::array<double, 3>>>> *edge_data,
-    std::vector<std::array<double, 3>> *vertices, size_t *v_ind) {
-  std::vector<size_t> inds_s = inds;
-  std::sort(inds_s.begin(), inds_s.end());
-  AddSingleEdge(inds_s[0], inds_s[1], num_additional, edge_data, vertices,
-                v_ind);
-  AddSingleEdge(inds_s[1], inds_s[2], num_additional, edge_data, vertices,
-                v_ind);
-  AddSingleEdge(inds_s[0], inds_s[2], num_additional, edge_data, vertices,
-                v_ind);
+void AddIcoEdgePoints(const int num_additional, size_t i0, size_t i1,
+                      size_t i2, EdgeMap *edge_data,
+                      std::vector<std::array<double, 3>> *vertices,
+                      size_t *v_ind) {
+  Sort3(i0, i1, i2);
+  AddSingleEdge(i0, i1, num_additional, edge_data, vertices, v_ind);
+  AddSingleEdge(i1, i2, num_additional, edge_data, vertices, v_ind);
+  AddSingleEdge(i0, i2, num_additional, edge_data, vertices, v_ind);
 }
 
-void FillIcoFace(
-    const std::vector<size_t> &inds,
-    const std::map<std::pair<size_t, size_t>,
-                   std::vector<std::pair<size_t, std::array<double, 3>>>>
-        &edge_data,
-    std::vector<std::array<double, 3>> *vertices, size_t *v_ind,
-    std::vector<std::vector<size_t>> *faces, size_t *face_ind) {
-  // We fill each row of the tri
-  std::vector<size_t> inds_s = inds;
-  std::sort(inds_s.begin(), inds_s.end());
-  size_t low = inds_s[0];
-  size_t mid = inds_s[1];
-  size_t high = inds_s[2];
-  // Check if sort changes normal
+void FillIcoFace(const size_t orig0, const size_t orig1, const size_t orig2,
+                 const EdgeMap &edge_data,
+                 std::vector<std::array<double, 3>> *vertices, size_t *v_ind,
+                 std::vector<std::array<size_t, 3>> *faces, size_t *face_ind) {
+  size_t low = orig0, mid = orig1, high = orig2;
+  Sort3(low, mid, high);
+
+  // Determine if the sort is an even permutation of the original
   bool permutation_sign = false;
-  if (inds[0] == low && inds[1] == mid) {
+  if (orig0 == low && orig1 == mid)
     permutation_sign = true;
-  }
-  if (inds[1] == low && inds[2] == mid) {
+  if (orig1 == low && orig2 == mid)
     permutation_sign = true;
-  }
-  if (inds[2] == low && inds[0] == mid) {
+  if (orig2 == low && orig0 == mid)
     permutation_sign = true;
-  }
-  const std::pair<size_t, size_t> bottom_key = std::make_pair(low, mid);
-  const std::pair<size_t, size_t> row_key_left = std::make_pair(low, high);
-  const std::pair<size_t, size_t> row_key_right = std::make_pair(mid, high);
-  std::vector<std::pair<size_t, std::array<double, 3>>> bottom_row =
-      edge_data.at(bottom_key);
-  std::vector<std::pair<size_t, std::array<double, 3>>> left_side =
-      edge_data.at(row_key_left);
-  std::vector<std::pair<size_t, std::array<double, 3>>> right_side =
-      edge_data.at(row_key_right);
-  std::array<double, 3> jump = {
-      bottom_row[1].second[0] - bottom_row[0].second[0],
-      bottom_row[1].second[1] - bottom_row[0].second[1],
-      bottom_row[1].second[2] - bottom_row[0].second[2]};
-  for (size_t i = 1; i < left_side.size(); i++) {
-    std::vector<std::pair<size_t, std::array<double, 3>>> new_bottom_row;
-    new_bottom_row.push_back(left_side[i]);
+
+  const auto &bottom_inds = edge_data.at(EdgeKey{low, mid});
+  const auto &left_inds = edge_data.at(EdgeKey{low, high});
+  const auto &right_inds = edge_data.at(EdgeKey{mid, high});
+
+  // Compute the jump vector from the bottom edge
+  const auto &p0 = (*vertices)[bottom_inds[0]];
+  const auto &p1 = (*vertices)[bottom_inds[1]];
+  const double jx = p1[0] - p0[0];
+  const double jy = p1[1] - p0[1];
+  const double jz = p1[2] - p0[2];
+
+  // We build rows bottom-to-top. Store only the index list for the current
+  // bottom row — avoid storing positions redundantly.
+  const size_t edge_len = bottom_inds.size();
+  // Use a flat buffer for the current bottom row indices (avoids
+  // vector-of-pair copies)
+  std::vector<size_t> bot_row(bottom_inds.begin(), bottom_inds.end());
+  std::vector<size_t> new_row;
+  new_row.reserve(edge_len);
+
+  for (size_t i = 1; i < left_inds.size(); i++) {
+    new_row.clear();
+    const size_t left_vi = left_inds[i];
+    new_row.push_back(left_vi);
+
+    // First triangle of the row
     if (permutation_sign) {
-      (*faces)[*face_ind] = {bottom_row[0].first, left_side[i].first,
-                             bottom_row[1].first};
+      (*faces)[(*face_ind)++] = {bot_row[0], left_vi, bot_row[1]};
     } else {
-      (*faces)[*face_ind] = {bottom_row[0].first, bottom_row[1].first,
-                             left_side[i].first};
+      (*faces)[(*face_ind)++] = {bot_row[0], bot_row[1], left_vi};
     }
-    (*face_ind)++;
-    for (size_t j = 1; j < bottom_row.size() - 1; j++) {
-      std::array<double, 3> pos;
-      size_t new_tri_ind = (*v_ind);
-      if (j != bottom_row.size() - 2) {
-        pos = {left_side[i].second[0] + (double)(j)*jump[0],
-               left_side[i].second[1] + (double)(j)*jump[1],
-               left_side[i].second[2] + (double)(j)*jump[2]};
-        (*vertices)[(*v_ind)++] = pos;
+
+    const auto &left_pos = (*vertices)[left_vi];
+    for (size_t j = 1; j < bot_row.size() - 1; j++) {
+      size_t new_vi;
+      if (j != bot_row.size() - 2) {
+        const double t = (double)j;
+        (*vertices)[*v_ind] = {left_pos[0] + t * jx, left_pos[1] + t * jy,
+                               left_pos[2] + t * jz};
+        new_vi = (*v_ind)++;
       } else {
-        // No need to create new point
-        pos = right_side[i].second;
-        new_tri_ind = right_side[i].first;
+        new_vi = right_inds[i];
       }
-      size_t ind_top_left = new_bottom_row[new_bottom_row.size() - 1].first;
-      size_t ind_top_right = new_tri_ind;
-      size_t ind_bottom_left = bottom_row[j].first;
-      size_t ind_bottom_right = bottom_row[j + 1].first;
+
+      const size_t tl = new_row.back();
+      const size_t tr = new_vi;
+      const size_t bl = bot_row[j];
+      const size_t br = bot_row[j + 1];
       if (permutation_sign) {
-        (*faces)[(*face_ind)++] = {ind_top_left, ind_top_right,
-                                   ind_bottom_left};
-        (*faces)[(*face_ind)++] = {ind_bottom_left, ind_top_right,
-                                   ind_bottom_right};
+        (*faces)[(*face_ind)++] = {tl, tr, bl};
+        (*faces)[(*face_ind)++] = {bl, tr, br};
       } else {
-        (*faces)[(*face_ind)++] = {ind_top_left, ind_bottom_left,
-                                   ind_top_right};
-        (*faces)[(*face_ind)++] = {ind_bottom_left, ind_bottom_right,
-                                   ind_top_right};
+        (*faces)[(*face_ind)++] = {tl, bl, tr};
+        (*faces)[(*face_ind)++] = {bl, br, tr};
       }
-      new_bottom_row.push_back(std::make_pair(new_tri_ind, pos));
+      new_row.push_back(new_vi);
     }
-    bottom_row = new_bottom_row;
+    std::swap(bot_row, new_row);
   }
 }
 
@@ -194,38 +194,39 @@ size_t NumInternalVertices(int num_additional) {
 } // namespace
 
 namespace icosphere {
-std::pair<std::vector<std::array<double, 3>>, std::vector<std::vector<size_t>>>
+std::pair<std::vector<std::array<double, 3>>, std::vector<std::array<size_t, 3>>>
 FastIcoSphere(const int num_additional, const bool project) {
-  // 1) Create basic icosahedron shape
   size_t num_vertices =
       12 + 30 * num_additional + 20 * NumInternalVertices(num_additional);
   std::vector<std::array<double, 3>> vertexPositions(num_vertices);
-  std::vector<std::vector<size_t>> faceIndices(20);
-  size_t num_faces = (num_additional + 1) * (num_additional + 1) * 20;
-  std::vector<std::vector<size_t>> fineFaceIndices(num_faces);
+  std::vector<std::array<size_t, 3>> faceIndices(20);
+  size_t num_faces = (size_t)(num_additional + 1) * (num_additional + 1) * 20;
+  std::vector<std::array<size_t, 3>> fineFaceIndices(num_faces);
   size_t face_counter = 0;
   size_t vertex_counter = 12;
   BasicIcosahedron(&vertexPositions, &faceIndices);
-  std::map<std::pair<size_t, size_t>,
-           std::vector<std::pair<size_t, std::array<double, 3>>>>
-      skeleton_points;
-  for (size_t i = 0; i < faceIndices.size(); i++) {
-    // 2) Add the "in between" vertices on the edges of the original, these hold
-    // the data to fill the rest of the points.
-    AddIcoEdgePoints(num_additional, faceIndices[i], &skeleton_points,
+
+  EdgeMap skeleton_points;
+  skeleton_points.reserve(64);
+
+  for (size_t i = 0; i < 20; i++) {
+    const auto &fi = faceIndices[i];
+    AddIcoEdgePoints(num_additional, fi[0], fi[1], fi[2], &skeleton_points,
                      &vertexPositions, &vertex_counter);
-    // 3) Add the faces and rest of "internal" vertices, since the needed
-    // vertices have been defined
-    FillIcoFace(faceIndices[i], skeleton_points, &vertexPositions,
+    FillIcoFace(fi[0], fi[1], fi[2], skeleton_points, &vertexPositions,
                 &vertex_counter, &fineFaceIndices, &face_counter);
   }
 
-  // 4) Scale
   if (project) {
     for (size_t i = 0; i < vertexPositions.size(); i++) {
-      Normalize(&vertexPositions[i]);
+      auto &p = vertexPositions[i];
+      const double inv_len =
+          1.0 / std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+      p[0] *= inv_len;
+      p[1] *= inv_len;
+      p[2] *= inv_len;
     }
   }
-  return std::make_pair(vertexPositions, fineFaceIndices);
+  return std::make_pair(std::move(vertexPositions), std::move(fineFaceIndices));
 }
 } // namespace icosphere

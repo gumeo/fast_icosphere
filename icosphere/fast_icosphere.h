@@ -19,10 +19,9 @@ OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 #define FAST_ICOSPHERE_H_
 
 
-#include <algorithm>
+#include <array>
 #include <cmath>
-#include <map>
-#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace icosphere {
@@ -32,7 +31,7 @@ namespace icosphere {
  * @param num_additional Number of additional vertices on the edges of an original icosahedron.
  * @param project if true, project to sphere, otherwise only subdivide.
  */
-std::pair<std::vector<std::array<double, 3>>, std::vector<std::vector<size_t>>> FastIcoSphere(const int num_additional,
-                                                                                              const bool project);
+std::pair<std::vector<std::array<double, 3>>, std::vector<std::array<size_t, 3>>> FastIcoSphere(const int num_additional,
+                                                                                                const bool project);
 } // namespace icosphere
 #endif
